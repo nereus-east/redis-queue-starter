@@ -1,0 +1,4 @@
+# Auto Configure
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+  org.nereus.queue.config.DistributedQueueAutoConfiguration,\
+  org.nereus.queue.config.RedisScriptConfiguration
