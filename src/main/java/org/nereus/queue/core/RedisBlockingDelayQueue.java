@@ -367,7 +367,6 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
     }
 
     private boolean retry(E job) {
-        long currentTimeMillis = System.currentTimeMillis();
         retryLock.lock();
         try {
             String jobContent = serialize(job);
