@@ -9,7 +9,7 @@ import java.util.concurrent.TimeUnit;
  * @author: nereus east
  * @data: 2020/3/19 16:10
  */
-public abstract class AbstractDelayedJob<M> implements Delayed {
+public abstract class AbstractDelayedJob implements Delayed {
 
     /**
      * The unique id of the job
@@ -37,24 +37,19 @@ public abstract class AbstractDelayedJob<M> implements Delayed {
     private long timeout;
 
     /**
-     * Elements in the queue
-     */
-    private M message;
-
-    /**
      * Indicate which topic the job belongs to, for caching only
      */
     private String topic = "";
 
     /**
-     * Task expected execution time in milliseconds
+     * The time the task is enabled to execute in milliseconds
      */
     private long expectedTime;
 
     /**
-     * Task real execution time in milliseconds
+     * The actual time the job was received by the server
      */
-    private long realTime = 0;
+    private long receiveTime;
 
     /**
      * For the first time interval
@@ -64,14 +59,13 @@ public abstract class AbstractDelayedJob<M> implements Delayed {
     public AbstractDelayedJob() {
     }
 
-    public AbstractDelayedJob(M message, long expectedTime) {
-        this(UUID.randomUUID().toString(), message, expectedTime);
+    public AbstractDelayedJob(long expectedTime) {
+        this(UUID.randomUUID().toString(), expectedTime);
     }
 
-    public AbstractDelayedJob(String id, M message, long expectedTime) {
+    public AbstractDelayedJob(String id, long expectedTime) {
         this.intervals = expectedTime - creationTime;
         this.id = id;
-        this.message = message;
         this.expectedTime = expectedTime;
     }
 
@@ -103,10 +97,6 @@ public abstract class AbstractDelayedJob<M> implements Delayed {
         this.timeout = timeout;
     }
 
-    public M getMessage() {
-        return message;
-    }
-
     public String getTopic() {
         return topic;
     }
@@ -119,12 +109,12 @@ public abstract class AbstractDelayedJob<M> implements Delayed {
         return expectedTime;
     }
 
-    public long getRealTime() {
-        return realTime;
+    public long getReceiveTime() {
+        return receiveTime;
     }
 
-    public void setRealTime(long realTime) {
-        this.realTime = realTime;
+    public void setReceiveTime(long receiveTime) {
+        this.receiveTime = receiveTime;
     }
 
     public long getIntervals() {
@@ -138,7 +128,7 @@ public abstract class AbstractDelayedJob<M> implements Delayed {
         return lostLives * lostLives * intervals;
     }
 
-    public int loseOneLifeAndGet() {
+    public final int loseOneLifeAndGet() {
         this.lostLives++;
         expectedTime = System.currentTimeMillis() + computeRetryInterval();
         return --this.lives;
@@ -146,12 +136,12 @@ public abstract class AbstractDelayedJob<M> implements Delayed {
 
 
     @Override
-    public long getDelay(TimeUnit unit) {
+    public final long getDelay(TimeUnit unit) {
         return unit.convert(expectedTime - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
     }
 
     @Override
-    public int compareTo(Delayed other) {
+    public final int compareTo(Delayed other) {
         if (other == null) {
             return -1;
         }

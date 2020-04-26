@@ -9,8 +9,8 @@ import org.nereus.queue.exception.RedisHashOpsException;
 import org.nereus.queue.exception.RedisZSetOpsException;
 import org.nereus.queue.helper.HashCompareSetOnListMoveToSortedSetParam;
 import org.nereus.queue.helper.RedisScriptExecuteHelper;
+import org.nereus.queue.helper.SortedSetAndHashPutResult;
 import org.nereus.queue.helper.SortedSetAndHashRemoveResult;
-import org.nereus.queue.constant.RedisBlockingDelayQueueConstant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -27,6 +27,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
+import static org.nereus.queue.constant.RedisBlockingDelayQueueConstant.*;
+
 /**
  * @description: Delay blocking queue based on redis
  * @author: nereus east
@@ -35,7 +37,7 @@ import java.util.function.Function;
 public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends AbstractQueue<E>
         implements BlockingQueue<E> {
 
-    private static final long DEFAULT_TIMEOUT = 1000;
+    private static final long DEFAULT_TIMEOUT = 10000;
 
     private static final int DEFAULT_LIVES = 3;
 
@@ -84,7 +86,7 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
      */
     private final Class<E> eClass;
 
-    StringRedisTemplate redisTemplate;
+    protected final StringRedisTemplate redisTemplate;
 
     protected final String queueName;
 
@@ -103,12 +105,12 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
     /**
      * The remaining execution time in the internal queue when the service is stopped
      */
-    private final long internalRemainingTimeOnShutdown = 20000L;
+    protected final long internalRemainingTimeOnShutdown = 20000L;
 
     /**
      * When the expected time is up, the job will be put into this queue
      */
-    private BlockingQueue<E> internalConsumptionQueue = new LinkedBlockingDeque<>();
+    protected final BlockingQueue<E> internalConsumptionQueue = new LinkedBlockingDeque<>();
 
 
     public RedisBlockingDelayQueue(StringRedisTemplate redisTemplate, String queueName, Class<E> eClass) {
@@ -135,10 +137,10 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
         this.queueName = queueName;
         this.timeout = timeout;
         this.initLives = initLives;
-        this.KEY_WAITING = queueName + RedisBlockingDelayQueueConstant.KEY_PRE_WAITING_SORTED_SET;
-        this.KEY_CONTENT = queueName + RedisBlockingDelayQueueConstant.KEY_PRE_CONTENT_HASH;
-        this.KEY_READY = queueName + RedisBlockingDelayQueueConstant.KEY_PRE_READY_LIST;
-        this.KEY_BACK = queueName + RedisBlockingDelayQueueConstant.KEY_PRE_BACK_LIST;
+        this.KEY_WAITING = queueName + KEY_PRE_WAITING_SORTED_SET;
+        this.KEY_CONTENT = queueName + KEY_PRE_CONTENT_HASH;
+        this.KEY_READY = queueName + KEY_PRE_READY_LIST;
+        this.KEY_BACK = queueName + KEY_PRE_BACK_LIST;
         this.ALL_KEY = new ArrayList<String>(4) {{
             this.add(KEY_WAITING);
             this.add(KEY_CONTENT);
@@ -233,11 +235,8 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
         }
     }
 
-    private void putToInternalAndUpdateMetadata(E job) throws InterruptedException {
-        job.setRealTime(System.currentTimeMillis());
-        redisTemplate.opsForHash().put(KEY_CONTENT, job.getId(), serialize(job));
-        internalConsumptionQueue.put(job);
-    }
+    private static final long defaultErrorDelayMillisecond = 100;
+    private final AtomicLong errorDelayMillisecond = new AtomicLong(100);
 
     /**
      * A single thread listens for redis and starts a batch thread to fetch data when a job expires
@@ -250,13 +249,28 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
             try {
                 String jobId = redisTemplate.opsForList().rightPopAndLeftPush(KEY_READY, KEY_BACK, 0, TimeUnit.MILLISECONDS);
                 E job = getContentById(jobId);
-                putToInternalAndUpdateMetadata(job);
+                updateAndPutToInternal(job);
                 notEmpty.signalAll();
                 empty.await();
+            } catch (InterruptedException e) {
+                throw e;
+            } catch (Exception e) {
+                long millisecond = errorDelayMillisecond.getAndUpdate(operand -> operand + 100);
+                log.error("Queue: [{}], the listen thread has an unknown exception and will be delayed for [{}] millisecond!",
+                        this.queueName, millisecond, e);
+                Thread.sleep(millisecond);
+                continue;
             } finally {
                 takeLock.unlock();
             }
+            errorDelayMillisecond.set(defaultErrorDelayMillisecond);
         }
+    }
+
+    private void updateAndPutToInternal(E job) throws InterruptedException {
+        job.setReceiveTime(System.currentTimeMillis());
+        redisTemplate.opsForHash().put(KEY_CONTENT, job.getId(), serialization(job));
+        internalConsumptionQueue.put(job);
     }
 
     private final int bulkSize = 100;
@@ -270,7 +284,7 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
                     if (jobIdList != null && jobIdList.size() > 0) {
                         consumerContentByIds(jobIdList, job -> {
                             try {
-                                putToInternalAndUpdateMetadata(job);
+                                updateAndPutToInternal(job);
                             } catch (InterruptedException e) {
                                 log.error("Queue: [{}], bulk pop error! Can't roll back temporarily, wait for retry detection and re-consumption", this.queueName, e);
                             }
@@ -282,9 +296,18 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
                     }
                 }
                 notEmpty.await();
+            } catch (InterruptedException e) {
+                throw e;
+            } catch (Exception e) {
+                long millisecond = errorDelayMillisecond.getAndUpdate(operand -> operand + 100);
+                log.error("Queue: [{}], the bulkPop thread has an unknown exception and will be delayed for [{}] millisecond!",
+                        this.queueName, millisecond, e);
+                Thread.sleep(millisecond);
+                continue;
             } finally {
                 takeLock.unlock();
             }
+            errorDelayMillisecond.set(defaultErrorDelayMillisecond);
         }
     }
 
@@ -295,9 +318,18 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
                 this.nextTransportTime.set(0);
                 expire.signalAll();
                 poll.await(1, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                throw e;
+            } catch (Exception e) {
+                long millisecond = errorDelayMillisecond.getAndUpdate(operand -> operand + 100);
+                log.error("Queue: [{}], the guaranteed thread has an unknown exception and will be delayed for [{}] millisecond!",
+                        this.queueName, millisecond, e);
+                Thread.sleep(millisecond);
+                continue;
             } finally {
                 transferLock.unlock();
             }
+            errorDelayMillisecond.set(defaultErrorDelayMillisecond);
         }
     }
 
@@ -315,25 +347,34 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
                     continue;
                 }
                 RetryResult retryResult = retryDetection(jobContentStrList, retryBatchSize.get());
-                long planCount = retryBatchSize.getAndUpdate(operand -> operand == retryResult.successCount ? operand * FACTOR : 1);
-                if (planCount > retryResult.successCount) {
-                    final E firstNoRetry = retryResult.firstNoRetry;
-                    long awaitBaseTime = firstNoRetry.getRealTime() > 0 ? firstNoRetry.getRealTime() : firstNoRetry.getExpectedTime();
-                    backEmpty.await(awaitBaseTime + timeout - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
+                long planRetry = retryBatchSize.getAndUpdate(operand -> operand == retryResult.realRetry ? operand * FACTOR : 1);
+                if (planRetry > retryResult.realRetry && retryResult.lastNoRetryJob != null) {
+                    final E lastNoRetryJob = retryResult.lastNoRetryJob;
+                    long consumerTime = lastNoRetryJob.getReceiveTime() > 0 ? lastNoRetryJob.getReceiveTime() : lastNoRetryJob.getExpectedTime();
+                    backEmpty.await(consumerTime + timeout - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
                 }
+            } catch (InterruptedException e) {
+                throw e;
+            } catch (Exception e) {
+                long millisecond = errorDelayMillisecond.getAndUpdate(operand -> operand + 100);
+                log.error("Queue: [{}], the retry thread has an unknown exception and will be delayed for [{}] millisecond!",
+                        this.queueName, millisecond, e);
+                Thread.sleep(millisecond);
+                continue;
             } finally {
                 retryLock.unlock();
             }
+            errorDelayMillisecond.set(defaultErrorDelayMillisecond);
         }
     }
 
     private class RetryResult {
-        private long successCount;
-        private E firstNoRetry;
+        private long realRetry;
+        private E lastNoRetryJob;
 
-        public RetryResult(long successCount, E firstNoRetry) {
-            this.successCount = successCount;
-            this.firstNoRetry = firstNoRetry;
+        public RetryResult(long realRetry, E lastNoRetryJob) {
+            this.realRetry = realRetry;
+            this.lastNoRetryJob = lastNoRetryJob;
         }
     }
 
@@ -346,50 +387,67 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
         /** These are only possible retry tasks, and the actual results of the lua script execution shall prevail */
 //        List<E> tryRetryJobList = new ArrayList<>(jobContentStrList.size());
         List<HashCompareSetOnListMoveToSortedSetParam> params = new ArrayList<>(jobContentStrList.size());
-        E firstNoRetry = null;
+        List<String> closeJobIds = new ArrayList<>();
+        E lastNoRetryJob = null;
         for (String jobContent : jobContentStrList) {
-            E job = deserialize(jobContent);
-            if (job.loseOneLifeAndGet() > 0 && job.getRealTime() - currentTimeMillis > this.timeout) {
-                params.add(
-                        HashCompareSetOnListMoveToSortedSetParam
-                                .build(job.getId(), jobContent, serialize(job), job.getExpectedTime()));
+            E job = deserialization(jobContent);
+            if (currentTimeMillis - job.getReceiveTime() > this.timeout) {
+                if (job.loseOneLifeAndGet() > 0) {
+                    params.add(
+                            HashCompareSetOnListMoveToSortedSetParam
+                                    .build(job.getId(), jobContent, serialization(job), job.getExpectedTime()));
+                } else {
+                    closeJobIds.add(job.getId());
+                }
             } else {
                 //In the case of the same timeout, the previous job has not timed out, then the next job must not have timed out
-                firstNoRetry = job;
+                lastNoRetryJob = job;
                 break;
             }
         }
-        if (CollectionUtils.isEmpty(params)) {
-            return new RetryResult(0, firstNoRetry);
+        if (closeJobIds.size() > 0) {
+            completeJobBulk(closeJobIds);
         }
-        long retryCount = RedisScriptExecuteHelper.hashCompareSetOnListMoveToSortedSet(redisTemplate, KEY_BACK, KEY_WAITING, KEY_CONTENT, params, retryBatchSize);
-        return new RetryResult(retryCount, firstNoRetry);
+        if (CollectionUtils.isEmpty(params)) {
+            return new RetryResult(0, lastNoRetryJob);
+        }
+        long retrySuccess =
+                RedisScriptExecuteHelper
+                        .hashCompareSetOnListMoveToSortedSet(redisTemplate, KEY_BACK, KEY_WAITING, KEY_CONTENT, params, retryBatchSize);
+        return new RetryResult(retrySuccess, lastNoRetryJob);
     }
 
+    /**
+     * Poor performance, optimization ideas:
+     * 1. Put into asynchronous queue batch retry
+     *
+     * @param job
+     * @return
+     */
     private boolean retry(E job) {
-        retryLock.lock();
-        try {
-            String jobContent = serialize(job);
-            if (job.loseOneLifeAndGet() > 0) {
-                ArrayList<HashCompareSetOnListMoveToSortedSetParam> scriptParams = new ArrayList<HashCompareSetOnListMoveToSortedSetParam>() {
-                    {
-                        this.add(HashCompareSetOnListMoveToSortedSetParam
-                                .build(job.getId(), jobContent, serialize(job), job.getExpectedTime()));
-                    }
-                };
-                return RedisScriptExecuteHelper
-                        .hashCompareSetOnListMoveToSortedSet(redisTemplate, KEY_BACK, KEY_WAITING, KEY_CONTENT, scriptParams
-                                , 100) > 0;
+        String jobContent = serialization(job);
+        if (job.loseOneLifeAndGet() > 0) {
+            ArrayList<HashCompareSetOnListMoveToSortedSetParam> scriptParams = new ArrayList<HashCompareSetOnListMoveToSortedSetParam>() {
+                {
+                    this.add(HashCompareSetOnListMoveToSortedSetParam
+                            .build(job.getId(), jobContent, serialization(job), job.getExpectedTime()));
+                }
+            };
+            boolean retrySuccess = RedisScriptExecuteHelper
+                    .hashCompareSetOnListMoveToSortedSet(redisTemplate, KEY_BACK, KEY_WAITING, KEY_CONTENT, scriptParams
+                            , 1000) > 0;
+            if (retrySuccess) {
+                updateNextTransportTime(job.getExpectedTime());
             }
-        } finally {
-            retryLock.unlock();
+            return retrySuccess;
+        } else {
+            tryCompleteJob(job);
         }
         return false;
     }
 
     /**
      * @Description: implement elegant shutdown
-     * todo implements
      * @Author nereus east
      * @Date 2020/3/22 20:24
      **/
@@ -432,9 +490,18 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
                     transport();
                     refreshNextTransportTime(currentTransportTime);
                 }
+            } catch (InterruptedException e) {
+                throw e;
+            } catch (Exception e) {
+                long millisecond = errorDelayMillisecond.getAndUpdate(operand -> operand + 100);
+                log.error("Queue: [{}], the transport thread has an unknown exception and will be delayed for [{}] millisecond!",
+                        this.queueName, millisecond, e);
+                Thread.sleep(millisecond);
+                continue;
             } finally {
                 transferLock.unlock();
             }
+            errorDelayMillisecond.set(defaultErrorDelayMillisecond);
         }
 
     }
@@ -473,18 +540,19 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
 
     private E getContentById(String jobId) {
         String jobContent = redisTemplate.<String, String>opsForHash().get(KEY_CONTENT, jobId);
-        return deserialize(jobContent);
+        E e = deserialization(jobContent);
+        return e;
     }
 
     private void consumerContentByIds(List<String> jobIdList, Consumer<E> jobConsumer) throws InterruptedException {
         List<String> jobContentStrList = redisTemplate.<String, String>opsForHash().multiGet(KEY_CONTENT, jobIdList);
         for (String contentStr : jobContentStrList) {
-            E job = deserialize(contentStr);
+            E job = deserialization(contentStr);
             jobConsumer.accept(job);
         }
     }
 
-    private void executeJobConsumer(Consumer<E> eConsumer, E job) {
+    protected void executeJobConsumer(Consumer<E> eConsumer, E job) {
         long currentTimeMillis = System.currentTimeMillis();
         try {
             eConsumer.accept(job);
@@ -498,7 +566,7 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
         }
     }
 
-    private Object executeJobFunction(Function<E, ?> eFunction, E job) {
+    protected Object executeJobFunction(Function<E, ?> eFunction, E job) {
         long currentTimeMillis = System.currentTimeMillis();
         try {
             Object result = eFunction.apply(job);
@@ -513,12 +581,12 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
         }
     }
 
-    private E deserialize(String jobStr) {
-        return JSON.parseObject(jobStr, eClass, Feature.SupportNonPublicField);
+    protected E deserialization(String jobStr) {
+        return JSON.parseObject(jobStr, this.eClass, Feature.SupportNonPublicField);
     }
 
-    private String serialize(E job) {
-        return JSON.toJSONString(job);
+    protected String serialization(E e) {
+        return JSON.toJSONString(e);
     }
 
     @Deprecated
@@ -537,10 +605,20 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
     public void put(E e) throws RedisBlockingDelayQueueException {
         Assert.notNull(e, "Job must be not null");
         initJob(e);
-        String id = e.getId();
-        String content = serialize(e);
+        final String id = e.getId();
+        String content = serialization(e);
         try {
-            RedisScriptExecuteHelper.sortedSetAndHashAdd(redisTemplate, KEY_WAITING, KEY_CONTENT, id, content, (double) e.getExpectedTime());
+            SortedSetAndHashPutResult sortedSetAndHashPutResult =
+                    RedisScriptExecuteHelper.sortedSetAndHashPut(redisTemplate,
+                            KEY_WAITING, KEY_CONTENT, id,
+                            content, (double) e.getExpectedTime(), true);
+            if (SortedSetAndHashPutResult.HASH_EXIST_ZSET_NOT_EXIST.equals(sortedSetAndHashPutResult)) {
+                log.warn("The job id[{}] may have expired, and it is ready", id);
+            }
+            if (SortedSetAndHashPutResult.HASH_NOT_EXIST_ZSET_EXIST.equals(sortedSetAndHashPutResult)) {
+                log.error("The job id[{}] redis data structure corruption", id);
+                throw new RedisBlockingDelayQueueException(String.format(String.format("The job id[%s] redis data structure corruption", id)));
+            }
             log.debug("Job id[{}] put success!");
         } catch (RedisHashOpsException ex) {
             log.warn("Job id[{}] data corruption, Make sure that the name are unique!", id);
@@ -550,6 +628,20 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
             log.warn(String.format("Job id[%s] data corruption, Make sure that the name are unique!"));
         }
         updateNextTransportTime(e.getExpectedTime());
+    }
+
+    public boolean putIfAbsent(E e) throws RedisBlockingDelayQueueException {
+        Assert.notNull(e, "Job must be not null");
+        initJob(e);
+        String id = e.getId();
+        String content = serialization(e);
+        boolean putSuccess
+                = RedisScriptExecuteHelper.sortedSetAndHashAddIfAbsent(redisTemplate, KEY_WAITING, KEY_CONTENT, id, content, (double) e.getExpectedTime());
+        log.debug("Job id[{}] put {}!", putSuccess ? "success" : "unsuccessful");
+        if (putSuccess) {
+            updateNextTransportTime(e.getExpectedTime());
+        }
+        return putSuccess;
     }
 
     private void initJob(E e) {
@@ -679,7 +771,7 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
     public E peek() {
         throw new RedisBlockingDelayQueueException("Not yet implemented, looking forward to the next release");
 //        String first = RedisScriptExecuteHelper.sortedFirstWithHashGet(redisTemplate, KEY_WAITING, KEY_CONTENT);
-//        return StringUtils.isEmpty(first) ? null : deserialize(first);
+//        return StringUtils.isEmpty(first) ? null : JSON.parseObject(first, eClass);
     }
 
     /**
@@ -716,7 +808,7 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
         return tryRemove(e.getId());
     }
 
-    private boolean tryRemove(String id) {
+    public boolean tryRemove(String id) {
         Assert.notNull(id, "Job id must be not null");
         SortedSetAndHashRemoveResult sortedSetAndHashRemoveResult
                 = RedisScriptExecuteHelper.sortedSetAndHashRemove(this.redisTemplate, KEY_WAITING, KEY_CONTENT, id);
@@ -746,5 +838,29 @@ public class RedisBlockingDelayQueue<E extends AbstractDelayedJob> extends Abstr
 
     public boolean tryCompleteJob(String id) throws RedisBlockingDelayQueueException {
         return RedisScriptExecuteHelper.listAndHashRemove(redisTemplate, KEY_BACK, KEY_CONTENT, id);
+    }
+
+    public long completeJobBulk(List<String> ids) throws RedisBlockingDelayQueueException {
+        return RedisScriptExecuteHelper.listAndHashRemoveBulk(redisTemplate, KEY_BACK, KEY_CONTENT, ids, 0);
+    }
+
+    public String getQueueName() {
+        return queueName;
+    }
+
+    public Class<E> getJobClass() {
+        return eClass;
+    }
+
+    public long getTimeout() {
+        return timeout;
+    }
+
+    public int getInitLives() {
+        return initLives;
+    }
+
+    public int getCapacity() {
+        return capacity;
     }
 }

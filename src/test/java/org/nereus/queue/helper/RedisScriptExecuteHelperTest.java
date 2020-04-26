@@ -1,8 +1,8 @@
 package org.nereus.queue.helper;
 
-import org.nereus.queue.RedisConfig;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.nereus.queue.RedisConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -11,7 +11,6 @@ import org.springframework.test.context.junit4.SpringJUnit4ClassRunner;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.Assert.*;
@@ -94,6 +93,40 @@ public class RedisScriptExecuteHelperTest {
         stringRedisTemplate.delete(hashKey);
     }
 
+    @Test
+    public void listAndHashRemoveBulk() {
+        String listKey = "list-test";
+        String hashKey = "hash-test";
+        stringRedisTemplate.delete(listKey);
+        stringRedisTemplate.delete(hashKey);
+
+        stringRedisTemplate.opsForList().leftPush(listKey, "1");
+        stringRedisTemplate.opsForList().leftPush(listKey, "2");
+        stringRedisTemplate.opsForList().leftPush(listKey, "3");
+        stringRedisTemplate.opsForHash().put(hashKey, "1", "test");
+        stringRedisTemplate.opsForHash().put(hashKey, "2", "test2");
+        stringRedisTemplate.opsForHash().put(hashKey, "3", "test");
+        stringRedisTemplate.opsForHash().put(hashKey, "4", "test4");
+
+        assertEquals(2L, RedisScriptExecuteHelper.listAndHashRemoveBulk(stringRedisTemplate, listKey, hashKey, new ArrayList<String>() {{
+            this.add("1");
+            this.add("3");
+        }}, 0));
+        assertEquals("2", stringRedisTemplate.opsForList().leftPop(listKey));
+
+        assertEquals(0L, RedisScriptExecuteHelper.listAndHashRemoveBulk(stringRedisTemplate, listKey, hashKey, new ArrayList<String>() {{
+            this.add("4");
+        }}, 0));
+        assertEquals(0L, RedisScriptExecuteHelper.listAndHashRemoveBulk(stringRedisTemplate, listKey, hashKey, new ArrayList<String>() {{
+            this.add("2");
+        }}, 0));
+
+        assertEquals("test2", stringRedisTemplate.opsForHash().get(hashKey, "2"));
+        assertEquals("test4", stringRedisTemplate.opsForHash().get(hashKey, "4"));
+
+        stringRedisTemplate.delete(listKey);
+        stringRedisTemplate.delete(hashKey);
+    }
 
     @Test
     public void listRightPopLeftPushAndBulkGet() {
@@ -166,8 +199,9 @@ public class RedisScriptExecuteHelperTest {
         stringRedisTemplate.delete(hashKey);
     }
 
+
     @Test
-    public void sortedSetAndHashAdd() {
+    public void sortedSetAndHashAddIfAbsent() {
         String zsetKey = "sorted-set-test";
         String hashKey = "hash-test";
 
@@ -175,12 +209,62 @@ public class RedisScriptExecuteHelperTest {
         stringRedisTemplate.delete(hashKey);
 
         String id = UUID.randomUUID().toString();
-        RedisScriptExecuteHelper.sortedSetAndHashAdd(stringRedisTemplate, zsetKey, hashKey, id, "test", 0d);
+        boolean result = RedisScriptExecuteHelper.sortedSetAndHashAddIfAbsent(stringRedisTemplate, zsetKey, hashKey, id, "test content", 0d);
+        assertTrue(result);
+        assertEquals("test content", stringRedisTemplate.opsForHash().get(hashKey, id));
+        assertEquals(id, stringRedisTemplate.opsForZSet().rangeByScore(zsetKey, 0, 0).toArray()[0]);
 
-        assertEquals("test", stringRedisTemplate.opsForHash().get(hashKey, id));
-        Set<String> contentSet = stringRedisTemplate.opsForZSet().rangeByScore(zsetKey, 0d, 0d);
-        assertNotNull(contentSet);
-        assertEquals(id, contentSet.toArray()[0]);
+        boolean result2 = RedisScriptExecuteHelper.sortedSetAndHashAddIfAbsent(stringRedisTemplate, zsetKey, hashKey, id, "test content2", 1d);
+        assertFalse(result2);
+        assertEquals("test content", stringRedisTemplate.opsForHash().get(hashKey, id));
+        assertEquals(id, stringRedisTemplate.opsForZSet().rangeByScore(zsetKey, 0, 0).toArray()[0]);
+
+
+        stringRedisTemplate.delete(zsetKey);
+        stringRedisTemplate.delete(hashKey);
+    }
+
+    @Test
+    public void sortedSetAndHashPut() {
+        String zsetKey = "sorted-set-test";
+        String hashKey = "hash-test";
+
+        stringRedisTemplate.delete(zsetKey);
+        stringRedisTemplate.delete(hashKey);
+
+        String id = UUID.randomUUID().toString();
+        SortedSetAndHashPutResult result = RedisScriptExecuteHelper.sortedSetAndHashPut(stringRedisTemplate, zsetKey, hashKey, id, "test content", 0d, true);
+        assertEquals(SortedSetAndHashPutResult.ADD_SUCCESS, result);
+        assertEquals("test content", stringRedisTemplate.opsForHash().get(hashKey, id));
+        assertEquals(id, stringRedisTemplate.opsForZSet().rangeByScore(zsetKey, 0, 0).toArray()[0]);
+
+        SortedSetAndHashPutResult result2 = RedisScriptExecuteHelper.sortedSetAndHashPut(stringRedisTemplate, zsetKey, hashKey, id, "test content2", 1d, true);
+        assertEquals(SortedSetAndHashPutResult.UPDATE_SUCCESS, result2);
+        assertEquals("test content2", stringRedisTemplate.opsForHash().get(hashKey, id));
+        assertEquals(id, stringRedisTemplate.opsForZSet().rangeByScore(zsetKey, 1, 1).toArray()[0]);
+
+        stringRedisTemplate.opsForHash().delete(hashKey, id);
+        SortedSetAndHashPutResult result3 = RedisScriptExecuteHelper.sortedSetAndHashPut(stringRedisTemplate, zsetKey, hashKey, id, "test content3", 2d, true);
+        assertEquals(SortedSetAndHashPutResult.HASH_NOT_EXIST_ZSET_EXIST, result3);
+        assertNull(stringRedisTemplate.opsForHash().get(hashKey, id));
+        assertEquals(id, stringRedisTemplate.opsForZSet().rangeByScore(zsetKey, 1, 1).toArray()[0]);
+
+        SortedSetAndHashPutResult result4 = RedisScriptExecuteHelper.sortedSetAndHashPut(stringRedisTemplate, zsetKey, hashKey, id, "test content3", 2d, false);
+        assertEquals(SortedSetAndHashPutResult.HASH_NOT_EXIST_ZSET_EXIST, result4);
+        assertEquals("test content3", stringRedisTemplate.opsForHash().get(hashKey, id));
+        assertEquals(id, stringRedisTemplate.opsForZSet().rangeByScore(zsetKey, 1, 1).toArray()[0]);
+
+        stringRedisTemplate.opsForZSet().remove(zsetKey, id);
+        SortedSetAndHashPutResult result5 = RedisScriptExecuteHelper.sortedSetAndHashPut(stringRedisTemplate, zsetKey, hashKey, id, "test content4", 3d, true);
+        assertEquals(SortedSetAndHashPutResult.HASH_EXIST_ZSET_NOT_EXIST, result5);
+        assertEquals("test content3", stringRedisTemplate.opsForHash().get(hashKey, id));
+        assertArrayEquals(new String[0], stringRedisTemplate.opsForZSet().range(zsetKey, 0, -1).toArray());
+
+        SortedSetAndHashPutResult result6 = RedisScriptExecuteHelper.sortedSetAndHashPut(stringRedisTemplate, zsetKey, hashKey, id, "test content4", 3d, false);
+        assertEquals(SortedSetAndHashPutResult.HASH_EXIST_ZSET_NOT_EXIST, result6);
+        assertEquals("test content4", stringRedisTemplate.opsForHash().get(hashKey, id));
+        assertArrayEquals(new String[0], stringRedisTemplate.opsForZSet().range(zsetKey, 0, -1).toArray());
+
 
         stringRedisTemplate.delete(zsetKey);
         stringRedisTemplate.delete(hashKey);

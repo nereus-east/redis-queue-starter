@@ -28,6 +28,13 @@ public class RedisScriptConfiguration {
         listAndHashRemoveScript.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/ListAndHashRemove.lua")));
     }
 
+    private final static DefaultRedisScript<Long> listAndHashRemoveBulkScript = new DefaultRedisScript<>();
+
+    static {
+        listAndHashRemoveBulkScript.setResultType(Long.class);
+        listAndHashRemoveBulkScript.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/ListAndHashRemoveBulk.lua")));
+    }
+
     private final static DefaultRedisScript<List> listRightPopLeftPushAndBulkGetScript = new DefaultRedisScript<>();
 
     static {
@@ -49,11 +56,18 @@ public class RedisScriptConfiguration {
         sortedFirstWithHashGetScript.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/SortedFirstWithHashGet.lua")));
     }
 
-    private final static DefaultRedisScript<Long> sortedSetAndHashAddScript = new DefaultRedisScript<>();
+    private final static DefaultRedisScript<Long> sortedSetAndHashAddIfAbsentScript = new DefaultRedisScript<>();
 
     static {
-        sortedSetAndHashAddScript.setResultType(Long.class);
-        sortedSetAndHashAddScript.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/SortedSetAndHashAdd.lua")));
+        sortedSetAndHashAddIfAbsentScript.setResultType(Long.class);
+        sortedSetAndHashAddIfAbsentScript.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/SortedSetAndHashAddIfAbsent.lua")));
+    }
+
+    private final static DefaultRedisScript<Long> sortedSetAndHashPutScript = new DefaultRedisScript<>();
+
+    static {
+        sortedSetAndHashPutScript.setResultType(Long.class);
+        sortedSetAndHashPutScript.setScriptSource(new ResourceScriptSource(new ClassPathResource("lua/SortedSetAndHashPut.lua")));
     }
 
     private final static DefaultRedisScript<List> sortedSetAndHashRemoveScript = new DefaultRedisScript<>();
@@ -85,6 +99,10 @@ public class RedisScriptConfiguration {
         return listAndHashRemoveScript;
     }
 
+    public static RedisScript<Long> getListAndHashRemoveBulkScript() {
+        return listAndHashRemoveBulkScript;
+    }
+
     public static RedisScript<List> getListRightPopLeftPushAndBulkGetScript() {
         return listRightPopLeftPushAndBulkGetScript;
     }
@@ -97,8 +115,12 @@ public class RedisScriptConfiguration {
         return sortedFirstWithHashGetScript;
     }
 
-    public static RedisScript<Long> getSortedSetAndHashAddScript() {
-        return sortedSetAndHashAddScript;
+    public static RedisScript<Long> getSortedSetAndHashAddIfAbsentScript() {
+        return sortedSetAndHashAddIfAbsentScript;
+    }
+
+    public static RedisScript<Long> getSortedSetAndHashPutScript() {
+        return sortedSetAndHashPutScript;
     }
 
     public static RedisScript<List> getSortedSetAndHashRemoveScript() {

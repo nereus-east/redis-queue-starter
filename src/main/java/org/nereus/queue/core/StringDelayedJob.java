@@ -5,16 +5,32 @@ package org.nereus.queue.core;
  * @author: nereus east
  * @data: 2020/3/22 14:57
  */
-public class StringDelayedJob extends AbstractDelayedJob<String> {
+public class StringDelayedJob extends AbstractDelayedJob {
+
+    private String message;
+
+    public static StringDelayedJob build(String message, long expectedTime) {
+        return new StringDelayedJob(message, expectedTime);
+    }
+
+    public static StringDelayedJob build(String message, String id, long expectedTime) {
+        return new StringDelayedJob(message, id, expectedTime);
+    }
 
     public StringDelayedJob() {
     }
 
-    public static StringDelayedJob build(String message, long expectedTime){
-        return new StringDelayedJob(message, expectedTime);
+    public StringDelayedJob(String message, long expectedTime) {
+        super(expectedTime);
+        this.message = message;
     }
 
-    public StringDelayedJob(String message, long expectedTime) {
-        super(message, expectedTime);
+    public String getMessage() {
+        return message;
+    }
+
+    public StringDelayedJob(String message, String id, long expectedTime) {
+        super(id, expectedTime);
+        this.message = message;
     }
 }

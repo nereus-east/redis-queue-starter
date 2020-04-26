@@ -62,6 +62,17 @@ public class RedisScriptExecuteHelper {
         return result > 0;
     }
 
+    public static long listAndHashRemoveBulk(RedisTemplate<String, String> redisTemplate,
+                                             String listKey, String hashKey, List<String> ids,
+                                             long listRemoveCount) {
+        List<String> keys = new ArrayList<>(2);
+        keys.add(listKey);
+        keys.add(hashKey);
+        Long result = redisTemplate.execute(RedisScriptConfiguration.getListAndHashRemoveBulkScript(), keys, JSON.toJSONString(ids),
+                String.valueOf(listRemoveCount));
+        return result.longValue();
+    }
+
     public static List<String> listRightPopLeftPushAndBulkGet(RedisTemplate<String, String> redisTemplate,
                                                               String popListKey, String pushListKey, long limitCount) {
         List<String> keys = new ArrayList<>(2);
@@ -97,19 +108,37 @@ public class RedisScriptExecuteHelper {
         return result;
     }
 
-    public static void sortedSetAndHashAdd(RedisTemplate<String, String> redisTemplate,
-                                           String sortedSetKey, String hashKey, String id, String content, Double score)
+    public static boolean sortedSetAndHashAddIfAbsent(RedisTemplate<String, String> redisTemplate,
+                                                      String sortedSetKey, String hashKey, String id, String content, Double score)
             throws RedisHashOpsException, RedisZSetOpsException {
         Assert.notNull(score, "score must not null");
         List<String> keys = new ArrayList<>(2);
         keys.add(sortedSetKey);
         keys.add(hashKey);
-        Long result = redisTemplate.execute(RedisScriptConfiguration.getSortedSetAndHashAddScript(), keys, id, content, String.valueOf(score));
+        Long result = redisTemplate.execute(RedisScriptConfiguration.getSortedSetAndHashAddIfAbsentScript(), keys, id, content, String.valueOf(score));
+        return result.longValue() == 0L;
+    }
+
+    public static SortedSetAndHashPutResult sortedSetAndHashPut(RedisTemplate<String, String> redisTemplate,
+                                                                String sortedSetKey, String hashKey, String id,
+                                                                String content, Double score, boolean rollbackOnFail) {
+        Assert.notNull(score, "score must not null");
+        List<String> keys = new ArrayList<>(2);
+        keys.add(sortedSetKey);
+        keys.add(hashKey);
+        Long result = redisTemplate.execute(RedisScriptConfiguration.getSortedSetAndHashPutScript(), keys, id, content, String.valueOf(score),
+                rollbackOnFail ? String.valueOf(1) : String.valueOf(0));
         switch (result.intValue()) {
+            case 0:
+                return SortedSetAndHashPutResult.ADD_SUCCESS;
             case 1:
-                throw new RedisHashOpsException(String.format("The field[%s] value[%s] is exist in the hash!", id, content));
+                return SortedSetAndHashPutResult.UPDATE_SUCCESS;
             case 2:
-                throw new RedisZSetOpsException(String.format("The member[%s] is exist in the sorted set!", id));
+                return SortedSetAndHashPutResult.HASH_NOT_EXIST_ZSET_EXIST;
+            case 3:
+                return SortedSetAndHashPutResult.HASH_EXIST_ZSET_NOT_EXIST;
+            default:
+                throw new RuntimeException("Script [SortedSetAndHashPut] No matching results!");
         }
     }
 
